@@ -1,0 +1,27 @@
+i am windows userEditQuick Localhost Webhook Testing for Windows + Laragon
+1. Install Stripe CLI
+
+Download stripe_1.x.x_windows_x86_64.zip from https://github.com/stripe/stripe-cli/releases
+Extract to C:\stripe-cli\
+Add C:\stripe-cli\ to Windows PATH (System Properties → Environment Variables)
+
+2. Setup Commands (Command Prompt/PowerShell)
+bash# Login to Stripe
+stripe login
+
+# Forward webhooks to Laravel
+stripe listen --forward-to localhost/stripe/webhook
+
+# Copy the displayed webhook secret to .env
+STRIPE_WEBHOOK_SECRET=whsec_your_secret_here
+3. Test (New CMD window)
+bashstripe trigger invoice.payment_succeeded
+stripe trigger customer.subscription.created
+4. Check Results
+
+Laravel logs: storage/logs/laravel.log
+Database: Check payments table
+
+Note: If Laragon uses different port (like :8080), use:
+bashstripe listen --forward-to localhost:8080/stripe/webhook
+Done! Stripe CLI handles everything - no ngrok needed.
