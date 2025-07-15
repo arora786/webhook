@@ -1,0 +1,383 @@
+/webhook file/
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
+
+class StripeWebhookController extends Controller
+{
+    /**
+     * Handle Stripe webhook events
+     */
+    public function handleWebhook(Request $request)
+    {
+        $payload = $request->getContent();
+        $sigHeader = $request->header('Stripe-Signature');
+        $endpointSecret = env('STRIPE_WEBHOOK_SECRET');
+
+        try {
+            // Verify webhook signature
+            $event = \Stripe\Webhook::constructEvent(
+                $payload, 
+                $sigHeader, 
+                $endpointSecret
+            );
+        } catch (\UnexpectedValueException $e) {
+            Log::error('Stripe Webhook: Invalid payload', ['error' => $e->getMessage()]);
+            return response('Invalid payload', 400);
+        } catch (\Stripe\Exception\SignatureVerificationException $e) {
+            Log::error('Stripe Webhook: Invalid signature', ['error' => $e->getMessage()]);
+            return response('Invalid signature', 400);
+        }
+
+        // Log the webhook event
+        Log::info('Stripe Webhook Event Received', [
+            'event_id' => $event->id,
+            'event_type' => $event->type,
+            'created' => $event->created,
+            'livemode' => $event->livemode
+        ]);
+
+        // Handle different event types
+        switch ($event->type) {
+            case 'invoice.payment_succeeded':
+                $this->handlePaymentSucceeded($event->data->object);
+                break;
+            
+            case 'invoice.payment_failed':
+                $this->handlePaymentFailed($event->data->object);
+                break;
+                
+            case 'customer.subscription.created':
+                $this->handleSubscriptionCreated($event->data->object);
+                break;
+                
+            case 'customer.subscription.updated':
+                $this->handleSubscriptionUpdated($event->data->object);
+                break;
+                
+            case 'customer.subscription.deleted':
+                $this->handleSubscriptionDeleted($event->data->object);
+                break;
+                
+            case 'invoice.created':
+                $this->handleInvoiceCreated($event->data->object);
+                break;
+                
+            default:
+                Log::info('Stripe Webhook: Unhandled event type', [
+                    'event_type' => $event->type,
+                    'event_id' => $event->id
+                ]);
+        }
+
+        return response('Webhook handled', 200);
+    }
+
+    /**
+     * Handle successful payment
+     */
+    private function handlePaymentSucceeded($invoice)
+    {
+        try {
+            DB::table('payments')->insert([
+                'subscription_id' => $invoice->subscription ?? null,
+                'response' => json_encode([
+                    'event_type' => 'payment_succeeded',
+                    'invoice_id' => $invoice->id,
+                    'amount_paid' => $invoice->amount_paid,
+                    'currency' => $invoice->currency,
+                    'customer_id' => $invoice->customer,
+                    'status' => $invoice->status,
+                    'payment_intent' => $invoice->payment_intent,
+                    'hosted_invoice_url' => $invoice->hosted_invoice_url,
+                    'invoice_pdf' => $invoice->invoice_pdf,
+                    'period_start' => $invoice->period_start,
+                    'period_end' => $invoice->period_end,
+                    'billing_reason' => $invoice->billing_reason
+                ]),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ]);
+
+            Log::info('Payment succeeded record inserted', [
+                'subscription_id' => $invoice->subscription,
+                'invoice_id' => $invoice->id,
+                'amount' => $invoice->amount_paid
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error inserting payment success record', [
+                'error' => $e->getMessage(),
+                'invoice_id' => $invoice->id
+            ]);
+        }
+    }
+
+    /**
+     * Handle failed payment
+     */
+    private function handlePaymentFailed($invoice)
+    {
+        try {
+            DB::table('payments')->insert([
+                'subscription_id' => $invoice->subscription ?? null,
+                'response' => json_encode([
+                    'event_type' => 'payment_failed',
+                    'invoice_id' => $invoice->id,
+                    'amount_due' => $invoice->amount_due,
+                    'currency' => $invoice->currency,
+                    'customer_id' => $invoice->customer,
+                    'status' => $invoice->status,
+                    'attempt_count' => $invoice->attempt_count,
+                    'billing_reason' => $invoice->billing_reason,
+                    'failure_code' => $invoice->failure_code ?? null,
+                    'failure_message' => $invoice->failure_message ?? null
+                ]),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ]);
+
+            Log::warning('Payment failed record inserted', [
+                'subscription_id' => $invoice->subscription,
+                'invoice_id' => $invoice->id,
+                'amount' => $invoice->amount_due,
+                'failure_reason' => $invoice->failure_message
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error inserting payment failed record', [
+                'error' => $e->getMessage(),
+                'invoice_id' => $invoice->id
+            ]);
+        }
+    }
+
+    /**
+     * Handle subscription created
+     */
+    private function handleSubscriptionCreated($subscription)
+    {
+        try {
+            DB::table('payments')->insert([
+                'subscription_id' => $subscription->id,
+                'response' => json_encode([
+                    'event_type' => 'subscription_created',
+                    'subscription_id' => $subscription->id,
+                    'customer_id' => $subscription->customer,
+                    'status' => $subscription->status,
+                    'current_period_start' => $subscription->current_period_start,
+                    'current_period_end' => $subscription->current_period_end,
+                    'plan_id' => $subscription->items->data[0]->price->id ?? null,
+                    'plan_amount' => $subscription->items->data[0]->price->unit_amount ?? null,
+                    'plan_currency' => $subscription->items->data[0]->price->currency ?? null,
+                    'trial_end' => $subscription->trial_end,
+                    'trial_start' => $subscription->trial_start
+                ]),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ]);
+
+            Log::info('Subscription created record inserted', [
+                'subscription_id' => $subscription->id,
+                'customer_id' => $subscription->customer,
+                'status' => $subscription->status
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error inserting subscription created record', [
+                'error' => $e->getMessage(),
+                'subscription_id' => $subscription->id
+            ]);
+        }
+    }
+
+    /**
+     * Handle subscription updated
+     */
+    private function handleSubscriptionUpdated($subscription)
+    {
+        try {
+            DB::table('payments')->insert([
+                'subscription_id' => $subscription->id,
+                'response' => json_encode([
+                    'event_type' => 'subscription_updated',
+                    'subscription_id' => $subscription->id,
+                    'customer_id' => $subscription->customer,
+                    'status' => $subscription->status,
+                    'current_period_start' => $subscription->current_period_start,
+                    'current_period_end' => $subscription->current_period_end,
+                    'plan_id' => $subscription->items->data[0]->price->id ?? null,
+                    'cancel_at_period_end' => $subscription->cancel_at_period_end,
+                    'canceled_at' => $subscription->canceled_at,
+                    'cancel_at' => $subscription->cancel_at
+                ]),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ]);
+
+            Log::info('Subscription updated record inserted', [
+                'subscription_id' => $subscription->id,
+                'status' => $subscription->status,
+                'cancel_at_period_end' => $subscription->cancel_at_period_end
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error inserting subscription updated record', [
+                'error' => $e->getMessage(),
+                'subscription_id' => $subscription->id
+            ]);
+        }
+    }
+
+    /**
+     * Handle subscription deleted
+     */
+    private function handleSubscriptionDeleted($subscription)
+    {
+        try {
+            DB::table('payments')->insert([
+                'subscription_id' => $subscription->id,
+                'response' => json_encode([
+                    'event_type' => 'subscription_deleted',
+                    'subscription_id' => $subscription->id,
+                    'customer_id' => $subscription->customer,
+                    'status' => $subscription->status,
+                    'canceled_at' => $subscription->canceled_at,
+                    'ended_at' => $subscription->ended_at
+                ]),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ]);
+
+            Log::info('Subscription deleted record inserted', [
+                'subscription_id' => $subscription->id,
+                'customer_id' => $subscription->customer,
+                'ended_at' => $subscription->ended_at
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error inserting subscription deleted record', [
+                'error' => $e->getMessage(),
+                'subscription_id' => $subscription->id
+            ]);
+        }
+    }
+
+    /**
+     * Handle invoice created
+     */
+    private function handleInvoiceCreated($invoice)
+    {
+        try {
+            DB::table('payments')->insert([
+                'subscription_id' => $invoice->subscription ?? null,
+                'response' => json_encode([
+                    'event_type' => 'invoice_created',
+                    'invoice_id' => $invoice->id,
+                    'customer_id' => $invoice->customer,
+                    'amount_due' => $invoice->amount_due,
+                    'currency' => $invoice->currency,
+                    'status' => $invoice->status,
+                    'billing_reason' => $invoice->billing_reason,
+                    'due_date' => $invoice->due_date,
+                    'period_start' => $invoice->period_start,
+                    'period_end' => $invoice->period_end
+                ]),
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now()
+            ]);
+
+            Log::info('Invoice created record inserted', [
+                'subscription_id' => $invoice->subscription,
+                'invoice_id' => $invoice->id,
+                'amount_due' => $invoice->amount_due
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error inserting invoice created record', [
+                'error' => $e->getMessage(),
+                'invoice_id' => $invoice->id
+            ]);
+        }
+    }
+}
+/**/
+<?php
+
+<?php
+
+// Add this to your routes/web.php or routes/api.php file
+
+use App\Http\Controllers\StripeWebhookController;
+
+// Stripe webhook route (should be in routes/api.php)
+Route::post('/stripe/webhook', [StripeWebhookController::class, 'handleWebhook']);
+
+// If you want to exclude this route from CSRF protection, 
+// add it to the $except array in app/Http/Middleware/VerifyCsrfToken.php:
+
+/*
+protected $except = [
+    'stripe/webhook',
+];
+*/
+
+
+# Add these to your .env file
+
+STRIPE_KEY=pk_test_your_publishable_key_here
+STRIPE_SECRET=sk_test_your_secret_key_here
+STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret_here
+/*csrf middle ware*/
+<?php
+
+namespace App\Http\Middleware;
+
+use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken as Middleware;
+
+class VerifyCsrfToken extends Middleware
+{
+    /**
+     * The URIs that should be excluded from CSRF verification.
+     *
+     * @var array<int, string>
+     */
+    protected $except = [
+        'stripe/webhook',  // Add this line to exclude webhook from CSRF
+    ];
+}
+
+Setup Instructions:
+
+Install Stripe PHP SDK (if not already installed):
+
+bashcomposer require stripe/stripe-php
+
+Add Environment Variables to your .env file with your actual Stripe keys
+Update CSRF Middleware to exclude the webhook route from CSRF protection
+Add the Route to your routes/api.php file
+Configure Webhook in Stripe Dashboard:
+
+Go to your Stripe Dashboard → Developers → Webhooks
+Add endpoint: https://yourdomain.com/stripe/webhook
+Select events you want to listen to
+Copy the webhook signing secret to your .env file
+
+
+
+Database Records:
+The webhook will insert records into your payments table with:
+
+subscription_id: The Stripe subscription ID
+response: JSON containing all relevant event data
+created_at and updated_at: Timestamps
+
+Logging:
+All events are logged with detailed information for debugging. Check your Laravel logs at storage/logs/laravel.log to monitor webhook activity.
+The webhook handles errors gracefully and will continue processing even if database insertion fails for individual events.RetryClaude does not have the ability to run the code it generates yet.Claude can make mistakes. Please double-check responses. Sonnet 4CopyPublish
