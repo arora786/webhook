@@ -401,7 +401,57 @@ async function scheduleSubscriptionChange(subscriptionId, newPriceId) {
   return updatedSchedule;
 }
 
-
+function scheduleSubscriptionChange($subscriptionId, $newPriceId) {
+    try {
+        // First, get the current subscription
+        $subscription = \Stripe\Subscription::retrieve($subscriptionId);
+        
+        // Create a schedule from existing subscription
+        $schedule = \Stripe\SubscriptionSchedule::create([
+            'from_subscription' => $subscriptionId,
+        ]);
+        
+        // Prepare current phase items
+        $currentPhaseItems = [];
+        foreach ($subscription->items->data as $item) {
+            $currentPhaseItems[] = [
+                'price' => $item->price->id,
+                'quantity' => $item->quantity
+            ];
+        }
+        
+        // Add the new phase (price change) to start at next billing cycle
+        $updatedSchedule = \Stripe\SubscriptionSchedule::update($schedule->id, [
+            'phases' => [
+                [
+                    // Current phase - keep existing setup until period ends
+                    'items' => $currentPhaseItems,
+                    'end_date' => $subscription->current_period_end, // End at current period
+                ],
+                [
+                    // New phase - starts after current period ends
+                    'items' => [
+                        [
+                            'price' => $newPriceId, // New monthly/yearly price
+                        ]
+                    ],
+                    // No end_date = continues indefinitely
+                ]
+            ]
+        ]);
+        
+        return $updatedSchedule;
+        
+    } catch (\Stripe\Exception\ApiErrorException $e) {
+        // Handle Stripe API errors
+        error_log('Stripe API Error: ' . $e->getMessage());
+        throw new Exception('Failed to schedule subscription change: ' . $e->getMessage());
+    } catch (Exception $e) {
+        // Handle other errors
+        error_log('General Error: ' . $e->getMessage());
+        throw $e;
+    }
+}
 Database Records:
 The webhook will insert records into your payments table with:
 
