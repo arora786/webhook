@@ -368,7 +368,38 @@ Go to your Stripe Dashboard → Developers → Webhooks
 Add endpoint: https://yourdomain.com/stripe/webhook
 Select events you want to listen to
 Copy the webhook signing secret to your .env file
-
+async function scheduleSubscriptionChange(subscriptionId, newPriceId) {
+  // First, get the current subscription
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  
+  // Create a schedule from existing subscription
+  const schedule = await stripe.subscriptionSchedules.create({
+    from_subscription: subscriptionId,
+  });
+  
+  // Add the new phase (price change) to start at next billing cycle
+  const updatedSchedule = await stripe.subscriptionSchedules.update(schedule.id, {
+    phases: [
+      {
+        // Current phase - keep existing setup until period ends
+        items: subscription.items.data.map(item => ({
+          price: item.price.id,
+          quantity: item.quantity
+        })),
+        end_date: subscription.current_period_end, // End at current period
+      },
+      {
+        // New phase - starts after current period ends
+        items: [{
+          price: newPriceId, // New monthly/yearly price
+        }],
+        // No end_date = continues indefinitely
+      }
+    ]
+  });
+  
+  return updatedSchedule;
+}
 
 
 Database Records:
